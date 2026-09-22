@@ -354,6 +354,27 @@
     "recordingHelp": {
       "string": "Starts recording when the flag is pressed and stops when you press the 1 key, then downloads the recording."
     },
+    "recordingResolution": {
+      "string": "Recording quality"
+    },
+    "recordingResolutionHelp": {
+      "string": "Higher resolutions render the project at that size while recording. 2160p (4K) is the default and gives the sharpest video; lower it if your computer struggles while recording."
+    },
+    "recordingResolution-source": {
+      "string": "Match the stage"
+    },
+    "recordingResolution-720": {
+      "string": "720p (HD)"
+    },
+    "recordingResolution-1080": {
+      "string": "1080p (Full HD)"
+    },
+    "recordingResolution-1440": {
+      "string": "1440p (2K)"
+    },
+    "recordingResolution-2160": {
+      "string": "2160p (4K)"
+    },
     "cloudVariables": {
       "string": "Cloud Variables",
       "context": "Cloud variables section header"

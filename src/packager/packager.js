@@ -260,12 +260,18 @@ class Packager extends EventTarget {
   }
 
   getAddonOptions () {
-    return {
+    const options = {
       ...this.options.chunks,
       specialCloudBehaviors: this.options.cloudVariables.specialCloudBehaviors,
       unsafeCloudBehaviors: this.options.cloudVariables.unsafeCloudBehaviors,
       pause: this.options.controls.pause.enabled
     };
+    if (!options.recording) {
+      // The resolution is a truthy string, so leaving it in would make every
+      // project pull in the addons bundle just for this default.
+      delete options.recordingResolution;
+    }
+    return options;
   }
 
   async loadResources () {
@@ -1701,6 +1707,7 @@ Packager.DEFAULT_OPTIONS = () => ({
     gamepad: false,
     pointerlock: false,
     recording: false,
+    recordingResolution: '2160',
   },
   cloudVariables: {
     mode: 'ws',
