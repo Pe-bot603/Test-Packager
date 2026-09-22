@@ -348,6 +348,12 @@
     "gamepadHelp": {
       "string": "Based on the \"Gamepad support\" addon."
     },
+    "recording": {
+      "string": "Record the project"
+    },
+    "recordingHelp": {
+      "string": "Starts recording when the flag is pressed and stops when you press the 1 key, then downloads the recording."
+    },
     "cloudVariables": {
       "string": "Cloud Variables",
       "context": "Cloud variables section header"
