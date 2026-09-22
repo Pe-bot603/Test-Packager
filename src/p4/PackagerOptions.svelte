@@ -648,6 +648,19 @@
         {$_('options.recording')}
       </label>
       <p>{$_('options.recordingHelp')}</p>
+      {#if $options.chunks.recording}
+        <label class="option">
+          {$_('options.recordingResolution')}
+          <select bind:value={$options.chunks.recordingResolution}>
+            <option value="source">{$_('options.recordingResolution-source')}</option>
+            <option value="720">{$_('options.recordingResolution-720')}</option>
+            <option value="1080">{$_('options.recordingResolution-1080')}</option>
+            <option value="1440">{$_('options.recordingResolution-1440')}</option>
+            <option value="2160">{$_('options.recordingResolution-2160')}</option>
+          </select>
+        </label>
+        <p>{$_('options.recordingResolutionHelp')}</p>
+      {/if}
     </div>
   </div>
 </Section>

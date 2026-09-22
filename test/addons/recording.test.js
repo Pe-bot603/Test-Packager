@@ -1,7 +1,9 @@
 import recording, {
   getSupportedMimeType,
   getFileExtension,
-  getRecordingFilename
+  getRecordingFilename,
+  getResolutionSize,
+  getVideoBitrate
 } from '../../src/addons/recording';
 
 jest.mock('../../src/scaffolding/download', () => jest.fn());
@@ -32,6 +34,7 @@ class FakeMediaRecorder {
   constructor (stream, options) {
     this.stream = stream;
     this.mimeType = options && options.mimeType;
+    this.options = options;
     this.state = 'inactive';
     this.started = 0;
     this.stopped = 0;
@@ -53,10 +56,23 @@ class FakeMediaRecorder {
 FakeMediaRecorder.instances = [];
 FakeMediaRecorder.isTypeSupported = (type) => type === 'video/webm';
 
-const makeScaffolding = () => {
+const makeScaffolding = ({nativeSize = [480, 360]} = {}) => {
   const handlers = {};
   const canvas = {
+    width: nativeSize[0],
+    height: nativeSize[1],
+    clientWidth: 480,
+    clientHeight: 360,
+    style: {},
     captureStream: () => new FakeMediaStream([makeTrack('video')])
+  };
+  const renderer = {
+    canvas,
+    _nativeSize: nativeSize,
+    resize: jest.fn((w, h) => {
+      canvas.width = w;
+      canvas.height = h;
+    })
   };
   const audioDestination = {
     stream: new FakeMediaStream([makeTrack('audio')]),
@@ -64,7 +80,7 @@ const makeScaffolding = () => {
   };
   const vm = {
     runtime: {
-      renderer: {canvas},
+      renderer,
       audioEngine: {
         audioContext: {createMediaStreamDestination: () => audioDestination},
         inputNode: {connect: jest.fn()}
@@ -74,7 +90,7 @@ const makeScaffolding = () => {
       }
     }
   };
-  return {scaffolding: {vm}, handlers, audioDestination};
+  return {scaffolding: {vm}, handlers, audioDestination, renderer, canvas};
 };
 
 let listeners;
@@ -83,6 +99,7 @@ const setupGlobals = () => {
   const store = {};
   global.MediaStream = FakeMediaStream;
   global.MediaRecorder = FakeMediaRecorder;
+  global.window = {devicePixelRatio: 1};
   global.Blob = class Blob {
     constructor (parts, options) {
       this.parts = parts;
@@ -109,6 +126,7 @@ afterEach(() => {
   delete global.MediaStream;
   delete global.MediaRecorder;
   delete global.document;
+  delete global.window;
 });
 
 describe('helpers', () => {
@@ -139,6 +157,33 @@ describe('helpers', () => {
   test('getSupportedMimeType returns null when unavailable', () => {
     delete global.MediaRecorder;
     expect(getSupportedMimeType()).toBe(null);
+  });
+
+  test('getResolutionSize keeps the stage size for "source"', () => {
+    expect(getResolutionSize('source', 480, 360)).toEqual({width: 480, height: 360});
+    expect(getResolutionSize(undefined, 480, 360)).toEqual({width: 480, height: 360});
+  });
+
+  test('getResolutionSize scales to the requested height preserving aspect ratio', () => {
+    expect(getResolutionSize('1080', 480, 360)).toEqual({width: 1440, height: 1080});
+    expect(getResolutionSize('2160', 480, 360)).toEqual({width: 2880, height: 2160});
+  });
+
+  test('getResolutionSize follows the on-screen aspect ratio', () => {
+    // A stretched/fullscreen stage should record without distortion.
+    expect(getResolutionSize('1080', 1600, 900)).toEqual({width: 1920, height: 1080});
+  });
+
+  test('getResolutionSize keeps dimensions even for odd aspect ratios', () => {
+    const size = getResolutionSize('1080', 481, 361);
+    expect(size.height).toBe(1080);
+    expect(size.width % 2).toBe(0);
+  });
+
+  test('getVideoBitrate scales with pixels and stays within bounds', () => {
+    expect(getVideoBitrate(480, 360, 30)).toBe(8_000_000);
+    expect(getVideoBitrate(1920, 1080, 30)).toBe(Math.round(1920 * 1080 * 30 * 0.2));
+    expect(getVideoBitrate(3840, 2160, 30)).toBe(49_766_400);
   });
 });
 
@@ -201,5 +246,68 @@ describe('run', () => {
     listeners.keydown({key: '2', keyCode: 50, target: global.document});
     expect(recorder.state).toBe('recording');
     expect(downloadBlob).not.toHaveBeenCalled();
+  });
+
+  test('requests a high bitrate so recordings are not visibly banded', () => {
+    const {scaffolding, handlers} = makeScaffolding();
+    recording({scaffolding, options: {recordingResolution: '1080'}});
+    handlers.PROJECT_START();
+    const recorder = FakeMediaRecorder.instances[0];
+    // The default MediaRecorder bitrate is far below this and causes banding.
+    expect(recorder.options.videoBitsPerSecond).toBe(getVideoBitrate(1440, 1080, 30));
+    expect(recorder.options.videoBitsPerSecond).toBeGreaterThan(8_000_000);
+  });
+
+  test('renders at the requested resolution while recording, then restores it', () => {
+    const {scaffolding, handlers, renderer, canvas} = makeScaffolding();
+    recording({scaffolding, options: {recordingResolution: '2160'}});
+    handlers.PROJECT_START();
+
+    expect(renderer.resize).toHaveBeenCalledWith(2880, 2160);
+    expect(canvas.width).toBe(2880);
+    expect(canvas.height).toBe(2160);
+
+    listeners.keydown({key: '1', target: global.document});
+    expect(canvas.width).toBe(480);
+    expect(canvas.height).toBe(360);
+  });
+
+  test('leaves the canvas size alone for the "source" resolution', () => {
+    const {scaffolding, handlers, renderer, canvas} = makeScaffolding();
+    recording({scaffolding, options: {recordingResolution: 'source'}});
+    handlers.PROJECT_START();
+    expect(renderer.resize).not.toHaveBeenCalled();
+    expect(canvas.width).toBe(480);
+    listeners.keydown({key: '1', target: global.document});
+    expect(canvas.width).toBe(480);
+  });
+
+  test('records at the requested size on a high-DPI display', () => {
+    const {scaffolding, handlers, canvas} = makeScaffolding();
+    global.window = {devicePixelRatio: 2};
+    try {
+      recording({scaffolding, options: {recordingResolution: '1080'}});
+      handlers.PROJECT_START();
+      // The renderer would size the backing store to 2880x2160; the recording
+      // must still produce exactly 1440x1080.
+      expect(canvas.width).toBe(1440);
+      expect(canvas.height).toBe(1080);
+    } finally {
+      delete global.window;
+    }
+  });
+
+  test('restores the canvas size when starting a new recording after one finished', () => {
+    const {scaffolding, handlers, renderer, canvas} = makeScaffolding();
+    recording({scaffolding, options: {recordingResolution: '1080'}});
+
+    handlers.PROJECT_START();
+    expect(canvas.width).toBe(1440);
+    listeners.keydown({key: '1', target: global.document});
+    expect(canvas.width).toBe(480);
+
+    handlers.PROJECT_START();
+    expect(canvas.width).toBe(1440);
+    expect(renderer.resize).toHaveBeenCalledTimes(3);
   });
 });
