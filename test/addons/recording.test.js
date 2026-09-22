@@ -69,10 +69,14 @@ const makeScaffolding = ({nativeSize = [480, 360]} = {}) => {
   const renderer = {
     canvas,
     _nativeSize: nativeSize,
-    resize: jest.fn((w, h) => {
+    resizeCalls: [],
+    resize (w, h) {
+      // The addon may wrap and restore this function, so record calls on the
+      // object itself rather than relying on a mock.
+      renderer.resizeCalls.push([w, h]);
       canvas.width = w;
       canvas.height = h;
-    })
+    }
   };
   const audioDestination = {
     stream: new FakeMediaStream([makeTrack('audio')]),
@@ -263,7 +267,7 @@ describe('run', () => {
     recording({scaffolding, options: {recordingResolution: '2160'}});
     handlers.PROJECT_START();
 
-    expect(renderer.resize).toHaveBeenCalledWith(2880, 2160);
+    expect(renderer.resizeCalls).toContainEqual([2880, 2160]);
     expect(canvas.width).toBe(2880);
     expect(canvas.height).toBe(2160);
 
@@ -276,7 +280,7 @@ describe('run', () => {
     const {scaffolding, handlers, renderer, canvas} = makeScaffolding();
     recording({scaffolding, options: {recordingResolution: 'source'}});
     handlers.PROJECT_START();
-    expect(renderer.resize).not.toHaveBeenCalled();
+    expect(renderer.resizeCalls).toHaveLength(0);
     expect(canvas.width).toBe(480);
     listeners.keydown({key: '1', target: global.document});
     expect(canvas.width).toBe(480);
@@ -308,6 +312,79 @@ describe('run', () => {
 
     handlers.PROJECT_START();
     expect(canvas.width).toBe(1440);
-    expect(renderer.resize).toHaveBeenCalledTimes(3);
+    expect(renderer.resizeCalls).toEqual([[1440, 1080], [480, 360], [1440, 1080]]);
+  });
+
+  test('keeps the recording resolution when the stage is relaid out mid-recording', () => {
+    // Regression: a relayout used to shrink the canvas back to the on-screen
+    // size, so a "4K" recording quietly came out at the window resolution.
+    const {scaffolding, handlers, renderer, canvas} = makeScaffolding();
+    recording({scaffolding, options: {recordingResolution: '2160'}});
+    handlers.PROJECT_START();
+    expect(canvas.width).toBe(2880);
+
+    // A window resize / fullscreen / loading screen going away.
+    renderer.resize(1420, 1065);
+    expect(canvas.width).toBe(2880);
+    expect(canvas.height).toBe(2160);
+
+    renderer.resize(1920, 1080);
+    expect(canvas.width).toBe(2880);
+    expect(canvas.height).toBe(2160);
+  });
+
+  test('goes back to following relayouts once the recording ends', () => {
+    const {scaffolding, handlers, renderer, canvas} = makeScaffolding();
+    recording({scaffolding, options: {recordingResolution: '2160'}});
+    handlers.PROJECT_START();
+    listeners.keydown({key: '1', target: global.document});
+    expect(canvas.width).toBe(480);
+
+    // The renderer's resize must be restored, not left pinned.
+    renderer.resize(640, 480);
+    expect(canvas.width).toBe(640);
+    expect(canvas.height).toBe(480);
+  });
+
+  test('stops the recording when the stop all block runs', () => {
+    const {scaffolding, handlers} = makeScaffolding();
+    recording({scaffolding});
+    handlers.PROJECT_START();
+    const recorder = FakeMediaRecorder.instances[0];
+    expect(recorder.state).toBe('recording');
+
+    handlers.PROJECT_STOP_ALL();
+    expect(recorder.state).toBe('inactive');
+    expect(downloadBlob).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not stop on the stop all that a green flag runs internally', () => {
+    // greenFlag() calls stopAll() before PROJECT_START, which emits
+    // PROJECT_STOP_ALL. That must not be treated as the stop all block.
+    const {scaffolding, handlers} = makeScaffolding();
+    recording({scaffolding});
+
+    handlers.PROJECT_START_BEFORE_RESET();
+    handlers.PROJECT_STOP_ALL();
+    handlers.PROJECT_START();
+
+    expect(FakeMediaRecorder.instances).toHaveLength(1);
+    expect(FakeMediaRecorder.instances[0].state).toBe('recording');
+    expect(downloadBlob).not.toHaveBeenCalled();
+  });
+
+  test('still stops on a stop all block after a green flag', () => {
+    const {scaffolding, handlers} = makeScaffolding();
+    recording({scaffolding});
+
+    handlers.PROJECT_START_BEFORE_RESET();
+    handlers.PROJECT_STOP_ALL();
+    handlers.PROJECT_START();
+    const recorder = FakeMediaRecorder.instances[0];
+
+    // The project itself runs "stop all".
+    handlers.PROJECT_STOP_ALL();
+    expect(recorder.state).toBe('inactive');
+    expect(downloadBlob).toHaveBeenCalledTimes(1);
   });
 });

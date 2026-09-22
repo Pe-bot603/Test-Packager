@@ -95,6 +95,9 @@ const run = ({ scaffolding, options = {} }) => {
   let audioDestination = null;
   // Set while the renderer's canvas is oversized for a high resolution recording.
   let restoreCanvasSize = null;
+  // True from the internal stopAll() that greenFlag() runs until that flag's
+  // PROJECT_START, so a flag press is not mistaken for the "stop all" block.
+  let resettingForGreenFlag = false;
 
   // captureStream() captures the canvas *backing store*, not its on-screen size,
   // so going fullscreen alone never improves the recording. Rendering the stage
@@ -102,53 +105,76 @@ const run = ({ scaffolding, options = {} }) => {
   const applyHighResolution = () => {
     const canvas = renderer.canvas;
     const devicePixelRatio = window.devicePixelRatio || 1;
-    // The canvas fills its container (width/height: 100%), so its CSS pixel size
-    // is the stage's on-screen size. Fall back to the backing store if unlaid out.
     const displayWidth = canvas.clientWidth || Math.round(canvas.width / devicePixelRatio);
     const displayHeight = canvas.clientHeight || Math.round(canvas.height / devicePixelRatio);
     const target = getResolutionSize(options.recordingResolution, displayWidth, displayHeight);
-    if (target.width === displayWidth && target.height === displayHeight) {
+
+    // "source" means "whatever the stage already renders at", so there is no
+    // fixed size to hold: the recording follows the on-screen size.
+    if (!RESOLUTION_HEIGHTS[options.recordingResolution]) {
       return target;
     }
 
     const previousWidth = canvas.width;
     const previousHeight = canvas.height;
-    // Only the number of rendered pixels changes; the CSS sizing is untouched, so
-    // the project looks exactly the same on screen while it records.
-    restoreCanvasSize = () => {
-      if (typeof renderer.resize === 'function') {
-        // Go through `resize` again so overlays and render quality follow the
-        // canvas back down; then re-assert the exact previous backing store.
-        renderer.resize(previousWidth / devicePixelRatio, previousHeight / devicePixelRatio);
+    // Any later relayout (the loading screen going away, fullscreen, a window
+    // resize, the stage being resized by the project) calls renderer.resize with
+    // the on-screen size, which would silently shrink the canvas back down and
+    // throw away the chosen resolution halfway through the recording. Ignore
+    // those for as long as the recording lasts: the recording size is fixed, and
+    // the CSS size is what keeps the project looking right on screen.
+    const originalResize = renderer.resize;
+    const setBackingStore = () => {
+      if (canvas.width === target.width && canvas.height === target.height) {
+        return;
       }
-      canvas.width = previousWidth;
-      canvas.height = previousHeight;
+      // `resize` multiplies by devicePixelRatio, so try it first for render
+      // quality and overlays, then set the backing store directly. On high-DPI
+      // screens that makes the encoded size exactly the requested one in pixels
+      // rather than a multiple of it.
+      if (typeof originalResize === 'function') {
+        originalResize.call(renderer, target.width, target.height);
+      }
+      canvas.width = target.width;
+      canvas.height = target.height;
+      if (renderer.dirty !== undefined) {
+        renderer.dirty = true;
+        renderer.draw();
+      }
+    };
+    if (typeof originalResize === 'function') {
+      renderer.resize = function () {
+        // Re-assert instead of resizing: a relayout must not undo the recording
+        // resolution. Calling through here would also leave `_updateOverlays`
+        // sized for the recording pixels rather than the on-screen canvas.
+        setBackingStore();
+      };
+    }
+
+    restoreCanvasSize = () => {
+      if (typeof originalResize === 'function') {
+        renderer.resize = originalResize;
+      }
+      // Restore to whatever the stage is currently displayed at, which may have
+      // changed (fullscreen, a window resize) while the recording was running.
+      const width = canvas.clientWidth || previousWidth / devicePixelRatio;
+      const height = canvas.clientHeight || previousHeight / devicePixelRatio;
+      // Go through the renderer again so overlays and render quality follow the
+      // canvas back down, then re-assert the exact backing store.
+      if (typeof originalResize === 'function') {
+        originalResize.call(renderer, width, height);
+      }
+      canvas.width = Math.round(width * devicePixelRatio);
+      canvas.height = Math.round(height * devicePixelRatio);
       if (renderer.dirty !== undefined) {
         renderer.dirty = true;
         renderer.draw();
       }
     };
 
-    if (typeof renderer.resize === 'function') {
-      // `resize` also refreshes render quality and overlays, which a raw
-      // canvas.width assignment would skip.
-      renderer.resize(target.width, target.height);
-      // `resize` multiplies by devicePixelRatio; re-assert the requested size so
-      // the encoded resolution is exactly what was asked for on high-DPI screens.
-      if (devicePixelRatio !== 1) {
-        canvas.width = target.width;
-        canvas.height = target.height;
-      }
-    } else {
-      canvas.width = target.width;
-      canvas.height = target.height;
-    }
-
-    if (renderer.dirty !== undefined) {
-      renderer.dirty = true;
-      renderer.draw();
-    }
-
+    setBackingStore();
+    // The canvas fills its container, so only the rendered pixel count grows:
+    // the CSS size is untouched and fullscreen still works during recording.
     return target;
   };
 
@@ -211,7 +237,12 @@ const run = ({ scaffolding, options = {} }) => {
     if (mimeType) {
       recorderOptions.mimeType = mimeType;
     }
-    recorderOptions.videoBitsPerSecond = getVideoBitrate(size.width, size.height, FRAME_RATE);
+    // Derive the bitrate from the canvas that is actually being captured, not
+    // from the requested size: on high-DPI screens the backing store is the
+    // encoded size, and an undersized bitrate makes the video visibly banded.
+    const encodedWidth = renderer.canvas.width || size.width;
+    const encodedHeight = renderer.canvas.height || size.height;
+    recorderOptions.videoBitsPerSecond = getVideoBitrate(encodedWidth, encodedHeight, FRAME_RATE);
 
     recorder = new MediaRecorder(stream, recorderOptions);
     recorder.ondataavailable = (event) => {
@@ -238,7 +269,23 @@ const run = ({ scaffolding, options = {} }) => {
     recorder.stop();
   };
 
-  vm.runtime.on('PROJECT_START', start);
+  vm.runtime.on('PROJECT_START_BEFORE_RESET', () => {
+    // greenFlag() runs stopAll() itself just before this, which emits
+    // PROJECT_STOP_ALL. That is a restart, not the project deciding to stop.
+    resettingForGreenFlag = true;
+  });
+  vm.runtime.on('PROJECT_START', () => {
+    resettingForGreenFlag = false;
+    start();
+  });
+  vm.runtime.on('PROJECT_STOP_ALL', () => {
+    if (resettingForGreenFlag) {
+      return;
+    }
+    // The "stop all" block (and the stop sign button) stops the project; finish
+    // the recording so the part that did play still gets downloaded.
+    stop();
+  });
 
   document.addEventListener('keydown', (e) => {
     // Don't hijack the 1 key while the user is typing into the ask prompt or
