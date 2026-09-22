@@ -641,6 +641,14 @@
         {$_('options.gamepadHelp')}
       </a>
     </div>
+
+    <div class="group">
+      <label class="option">
+        <input type="checkbox" bind:checked={$options.chunks.recording}>
+        {$_('options.recording')}
+      </label>
+      <p>{$_('options.recordingHelp')}</p>
+    </div>
   </div>
 </Section>
 

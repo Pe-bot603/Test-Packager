@@ -1700,6 +1700,7 @@ Packager.DEFAULT_OPTIONS = () => ({
   chunks: {
     gamepad: false,
     pointerlock: false,
+    recording: false,
   },
   cloudVariables: {
     mode: 'ws',

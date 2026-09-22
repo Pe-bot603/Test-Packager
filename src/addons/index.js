@@ -3,6 +3,7 @@ import pointerlock from './pointerlock';
 import specialCloudBehaviors from './special-cloud-behaviors';
 import unsafeCloudBehaviors from './unsafe-cloud-behaviors';
 import pause from './pause';
+import recording from './recording';
 
 const run = (scaffolding, options) => {
   const api = {
@@ -15,6 +16,7 @@ const run = (scaffolding, options) => {
   if (options.specialCloudBehaviors) specialCloudBehaviors(api);
   if (options.unsafeCloudBehaviors) unsafeCloudBehaviors(api);
   if (options.pause) pause(api);
+  if (options.recording) recording(api);
 };
 
 window.ScaffoldingAddons = {
