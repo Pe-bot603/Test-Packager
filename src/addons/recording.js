@@ -8,12 +8,28 @@ const PREFERRED_MIME_TYPES = [
   'video/webm'
 ];
 
-const getSupportedMimeType = () => {
+// H.264 encoders routinely refuse frames larger than 4K and report the failure
+// as an EncodingError *after* recording has begun, which would throw away the
+// whole take. VP9 encodes any size the canvas can hold, so fall back to it.
+const MAX_AVC1_PIXELS = 3840 * 2160;
+
+const isMimeTypeUsableForSize = (mimeType, width, height) => {
+  if (!mimeType || mimeType.indexOf('video/mp4') !== 0) {
+    return true;
+  }
+  if (!width || !height) {
+    // No known size yet: this is only an availability check.
+    return true;
+  }
+  return width * height <= MAX_AVC1_PIXELS;
+};
+
+const getSupportedMimeType = (width, height) => {
   if (typeof MediaRecorder === 'undefined') {
     return null;
   }
   for (const mimeType of PREFERRED_MIME_TYPES) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
+    if (MediaRecorder.isTypeSupported(mimeType) && isMimeTypeUsableForSize(mimeType, width, height)) {
       return mimeType;
     }
   }
@@ -75,15 +91,14 @@ const FRAME_RATE = 30;
 const run = ({ scaffolding, options = {} }) => {
   const vm = scaffolding.vm;
 
-  const mimeType = getSupportedMimeType();
-  if (mimeType === null) {
-    console.warn('Recording addon: MediaRecorder is not supported in this browser');
-    return;
-  }
-
   const renderer = vm.runtime.renderer;
   if (!renderer || !renderer.canvas || typeof renderer.canvas.captureStream !== 'function') {
     console.warn('Recording addon: canvas captureStream is not supported in this browser');
+    return;
+  }
+
+  if (getSupportedMimeType() === null) {
+    console.warn('Recording addon: MediaRecorder is not supported in this browser');
     return;
   }
 
@@ -246,15 +261,19 @@ const run = ({ scaffolding, options = {} }) => {
       return;
     }
 
-    const recorderOptions = {};
-    if (mimeType) {
-      recorderOptions.mimeType = mimeType;
-    }
     // Derive the bitrate from the canvas that is actually being captured, not
     // from the requested size: on high-DPI screens the backing store is the
     // encoded size, and an undersized bitrate makes the video visibly banded.
     const encodedWidth = renderer.canvas.width || size.width;
     const encodedHeight = renderer.canvas.height || size.height;
+    // The codec has to be chosen for the size that is really being encoded, so
+    // that an oversized stage does not pick an encoder that will refuse it.
+    const recorderMimeType = getSupportedMimeType(encodedWidth, encodedHeight);
+
+    const recorderOptions = {};
+    if (recorderMimeType) {
+      recorderOptions.mimeType = recorderMimeType;
+    }
     recorderOptions.videoBitsPerSecond = getVideoBitrate(encodedWidth, encodedHeight, FRAME_RATE);
 
     // FIX: Fallback mechanism if MediaRecorder fails with advanced config options
@@ -270,15 +289,17 @@ const run = ({ scaffolding, options = {} }) => {
         return;
       }
     }
-
+    // The recorder settles on the actual codec (for example adding the audio
+    // codec), so the blob has to be labelled with that rather than the request.
+    const actualMimeType = recorder.mimeType || recorderMimeType;
     recorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
         chunks.push(event.data);
       }
     };
     recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || 'video/webm' });
-      downloadBlob(getRecordingFilename(mimeType), blob);
+      const blob = new Blob(chunks, {type: actualMimeType || 'video/webm'});
+      downloadBlob(getRecordingFilename(actualMimeType), blob);
       dispose();
     };
     recorder.onerror = (event) => {

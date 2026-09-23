@@ -163,6 +163,26 @@ describe('helpers', () => {
     expect(getSupportedMimeType()).toBe(null);
   });
 
+  test('getSupportedMimeType avoids avc1 for stages larger than 4K', () => {
+    global.MediaRecorder = {
+      isTypeSupported: (type) => type === 'video/mp4;codecs=avc1' || type === 'video/webm;codecs=vp9'
+    };
+    // H.264 encoders reject frames this large, so VP9 has to be used instead of
+    // recording nothing at all.
+    expect(getSupportedMimeType(3840, 2880)).toBe('video/webm;codecs=vp9');
+    expect(getSupportedMimeType(7680, 4320)).toBe('video/webm;codecs=vp9');
+  });
+
+  test('getSupportedMimeType still prefers avc1 at or below 4K', () => {
+    global.MediaRecorder = {
+      isTypeSupported: (type) => type === 'video/mp4;codecs=avc1' || type === 'video/webm;codecs=vp9'
+    };
+    expect(getSupportedMimeType(3840, 2160)).toBe('video/mp4;codecs=avc1');
+    expect(getSupportedMimeType(2880, 2160)).toBe('video/mp4;codecs=avc1');
+    // Only an availability check: no size known yet.
+    expect(getSupportedMimeType()).toBe('video/mp4;codecs=avc1');
+  });
+
   test('getResolutionSize keeps the stage size for "source"', () => {
     expect(getResolutionSize('source', 480, 360)).toEqual({width: 480, height: 360});
     expect(getResolutionSize(undefined, 480, 360)).toEqual({width: 480, height: 360});
@@ -237,9 +257,30 @@ describe('run', () => {
     recording({scaffolding});
     handlers.PROJECT_START();
     const recorder = FakeMediaRecorder.instances[0];
-    listeners.keydown({key: '1', target: {}});
+    listeners.keydown({key: '1', target: {tagName: 'INPUT'}});
     expect(recorder.state).toBe('recording');
     expect(downloadBlob).not.toHaveBeenCalled();
+  });
+
+  test('ignores the 1 key while typing in a textarea or editable field', () => {
+    const {scaffolding, handlers} = makeScaffolding();
+    recording({scaffolding});
+    handlers.PROJECT_START();
+    const recorder = FakeMediaRecorder.instances[0];
+    listeners.keydown({key: '1', target: {tagName: 'TEXTAREA'}});
+    listeners.keydown({key: '1', target: {isContentEditable: true}});
+    expect(recorder.state).toBe('recording');
+    expect(downloadBlob).not.toHaveBeenCalled();
+  });
+
+  test('still stops on the 1 key when the stage has focus', () => {
+    const {scaffolding, handlers} = makeScaffolding();
+    recording({scaffolding});
+    handlers.PROJECT_START();
+    const recorder = FakeMediaRecorder.instances[0];
+    listeners.keydown({key: '1', target: {tagName: 'CANVAS'}});
+    expect(recorder.state).toBe('inactive');
+    expect(downloadBlob).toHaveBeenCalledTimes(1);
   });
 
   test('keeps recording when a key other than 1 is pressed', () => {
