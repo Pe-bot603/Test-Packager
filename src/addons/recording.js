@@ -54,7 +54,7 @@ const getResolutionSize = (resolution, displayWidth, displayHeight) => {
   const targetHeight = RESOLUTION_HEIGHTS[resolution];
   if (!targetHeight) {
     // Unknown or "source": leave the stage rendering at whatever it already is.
-    return {width: displayWidth, height: displayHeight};
+    return { width: displayWidth, height: displayHeight };
   }
   const aspectRatio = displayHeight ? displayWidth / displayHeight : DEFAULT_ASPECT_RATIO;
   const targetWidth = Math.round(targetHeight * aspectRatio);
@@ -187,11 +187,20 @@ const run = ({ scaffolding, options = {} }) => {
     }
 
     const audioEngine = vm.runtime.audioEngine;
-    if (audioEngine && audioEngine.audioContext && audioEngine.inputNode) {
-      audioDestination = audioEngine.audioContext.createMediaStreamDestination();
-      audioEngine.inputNode.connect(audioDestination);
-      for (const track of audioDestination.stream.getAudioTracks()) {
-        result.addTrack(track);
+    if (audioEngine && audioEngine.audioContext) {
+      // FIX: Ensure AudioContext is actively running (prevents silent audio if suspended by browser policy)
+      if (audioEngine.audioContext.state === 'suspended') {
+        audioEngine.audioContext.resume().catch(err => {
+          console.warn('Recording addon: failed to resume AudioContext', err);
+        });
+      }
+
+      if (audioEngine.inputNode) {
+        audioDestination = audioEngine.audioContext.createMediaStreamDestination();
+        audioEngine.inputNode.connect(audioDestination);
+        for (const track of audioDestination.stream.getAudioTracks()) {
+          result.addTrack(track);
+        }
       }
     }
 
@@ -208,7 +217,11 @@ const run = ({ scaffolding, options = {} }) => {
     recorder = null;
     chunks = [];
     if (audioDestination) {
-      audioDestination.disconnect();
+      try {
+        audioDestination.disconnect();
+      } catch (e) {
+        // Ignore disconnection errors if already cleaned up
+      }
       audioDestination = null;
     }
     if (restoreCanvasSize) {
@@ -244,14 +257,27 @@ const run = ({ scaffolding, options = {} }) => {
     const encodedHeight = renderer.canvas.height || size.height;
     recorderOptions.videoBitsPerSecond = getVideoBitrate(encodedWidth, encodedHeight, FRAME_RATE);
 
-    recorder = new MediaRecorder(stream, recorderOptions);
+    // FIX: Fallback mechanism if MediaRecorder fails with advanced config options
+    try {
+      recorder = new MediaRecorder(stream, recorderOptions);
+    } catch (error) {
+      console.warn('Recording addon: failed with custom recorder options, falling back to default', error);
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch (err) {
+        console.error('Recording addon: MediaRecorder instantiation failed completely', err);
+        dispose();
+        return;
+      }
+    }
+
     recorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
         chunks.push(event.data);
       }
     };
     recorder.onstop = () => {
-      const blob = new Blob(chunks, {type: mimeType || 'video/webm'});
+      const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || 'video/webm' });
       downloadBlob(getRecordingFilename(mimeType), blob);
       dispose();
     };
@@ -259,7 +285,9 @@ const run = ({ scaffolding, options = {} }) => {
       console.error('Recording addon: recorder error', event.error);
       dispose();
     };
-    recorder.start();
+
+    // FIX: Pass a timeslice of 1000ms to flush chunks regularly and prevent data corruption
+    recorder.start(1000);
   };
 
   const stop = () => {
@@ -288,9 +316,9 @@ const run = ({ scaffolding, options = {} }) => {
   });
 
   document.addEventListener('keydown', (e) => {
-    // Don't hijack the 1 key while the user is typing into the ask prompt or
-    // an editable list monitor.
-    if (e.target !== document && e.target !== document.body) {
+    const target = e.target;
+    // FIX: Ignore keypress if the user is typing into input fields, textareas, or editable containers
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
       return;
     }
     if (e.key === '1' || e.keyCode === 49) {
