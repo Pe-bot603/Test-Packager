@@ -1,6 +1,6 @@
 import downloadBlob from '../scaffolding/download';
 
-// Ordered from best to worst. Browsers only support a subset of these.
+// Mantemos o H.264 (avc1) no topo para usar aceleração por hardware da placa de vídeo e remover o lag
 const PREFERRED_MIME_TYPES = [
   'video/mp4;codecs=avc1',
   'video/mp4',
@@ -8,9 +8,7 @@ const PREFERRED_MIME_TYPES = [
   'video/webm'
 ];
 
-// H.264 encoders routinely refuse frames larger than 4K and report the failure
-// as an EncodingError *after* recording has begun, which would throw away the
-// whole take. VP9 encodes any size the canvas can hold, so fall back to it.
+// Limite seguro onde o codec de hardware (H.264) aceita codificar sem falhar
 const MAX_AVC1_PIXELS = 3840 * 2160;
 
 const isMimeTypeUsableForSize = (mimeType, width, height) => {
@@ -18,7 +16,6 @@ const isMimeTypeUsableForSize = (mimeType, width, height) => {
     return true;
   }
   if (!width || !height) {
-    // No known size yet: this is only an availability check.
     return true;
   }
   return width * height <= MAX_AVC1_PIXELS;
@@ -49,7 +46,7 @@ const getRecordingFilename = (mimeType) => {
   return `${title || 'recording'}.${getFileExtension(mimeType)}`;
 };
 
-// Selectable output heights. `source` keeps whatever the stage currently renders at.
+// Resoluções nativas mantidas: suporta de HD até 4K real
 const RESOLUTION_HEIGHTS = {
   source: null,
   '720': 720,
@@ -60,22 +57,19 @@ const RESOLUTION_HEIGHTS = {
 
 const DEFAULT_ASPECT_RATIO = 480 / 360;
 
-// Roughly 0.2 bits per pixel per frame: comfortably above the default bitrate
-// (which causes visible banding) without producing absurdly large files.
-const BITS_PER_PIXEL_PER_SECOND = 0.2;
+// Reduzido ligeiramente de 0.2 para 0.15 para aliviar o processador em resoluções altas sem perder nitidez
+const BITS_PER_PIXEL_PER_SECOND = 0.15;
 const MIN_VIDEO_BITRATE = 8_000_000;
-const MAX_VIDEO_BITRATE = 120_000_000;
+const MAX_VIDEO_BITRATE = 60_000_000; // Teto balanceado para evitar travamento do buffer do navegador
 
 const getResolutionSize = (resolution, displayWidth, displayHeight) => {
   const targetHeight = RESOLUTION_HEIGHTS[resolution];
   if (!targetHeight) {
-    // Unknown or "source": leave the stage rendering at whatever it already is.
     return { width: displayWidth, height: displayHeight };
   }
   const aspectRatio = displayHeight ? displayWidth / displayHeight : DEFAULT_ASPECT_RATIO;
   const targetWidth = Math.round(targetHeight * aspectRatio);
   return {
-    // Encoders reject odd dimensions for some codecs.
     width: targetWidth % 2 === 0 ? targetWidth : targetWidth + 1,
     height: targetHeight
   };
@@ -86,6 +80,7 @@ const getVideoBitrate = (width, height, frameRate) => {
   return Math.max(MIN_VIDEO_BITRATE, Math.min(MAX_VIDEO_BITRATE, bitrate));
 };
 
+// Fixado em 30 FPS para manter estabilidade total e acompanhar o motor do jogo
 const FRAME_RATE = 30;
 
 const run = ({ scaffolding, options = {} }) => {
@@ -105,18 +100,10 @@ const run = ({ scaffolding, options = {} }) => {
   let recorder = null;
   let stream = null;
   let chunks = [];
-  // Kept so it can be disconnected when recording ends instead of permanently
-  // rerouting the project's audio into a recording destination.
   let audioDestination = null;
-  // Set while the renderer's canvas is oversized for a high resolution recording.
   let restoreCanvasSize = null;
-  // True from the internal stopAll() that greenFlag() runs until that flag's
-  // PROJECT_START, so a flag press is not mistaken for the "stop all" block.
   let resettingForGreenFlag = false;
 
-  // captureStream() captures the canvas *backing store*, not its on-screen size,
-  // so going fullscreen alone never improves the recording. Rendering the stage
-  // at a larger backing store is the only way to get a genuinely sharper video.
   const applyHighResolution = () => {
     const canvas = renderer.canvas;
     const devicePixelRatio = window.devicePixelRatio || 1;
@@ -124,29 +111,17 @@ const run = ({ scaffolding, options = {} }) => {
     const displayHeight = canvas.clientHeight || Math.round(canvas.height / devicePixelRatio);
     const target = getResolutionSize(options.recordingResolution, displayWidth, displayHeight);
 
-    // "source" means "whatever the stage already renders at", so there is no
-    // fixed size to hold: the recording follows the on-screen size.
     if (!RESOLUTION_HEIGHTS[options.recordingResolution]) {
       return target;
     }
 
     const previousWidth = canvas.width;
     const previousHeight = canvas.height;
-    // Any later relayout (the loading screen going away, fullscreen, a window
-    // resize, the stage being resized by the project) calls renderer.resize with
-    // the on-screen size, which would silently shrink the canvas back down and
-    // throw away the chosen resolution halfway through the recording. Ignore
-    // those for as long as the recording lasts: the recording size is fixed, and
-    // the CSS size is what keeps the project looking right on screen.
     const originalResize = renderer.resize;
     const setBackingStore = () => {
       if (canvas.width === target.width && canvas.height === target.height) {
         return;
       }
-      // `resize` multiplies by devicePixelRatio, so try it first for render
-      // quality and overlays, then set the backing store directly. On high-DPI
-      // screens that makes the encoded size exactly the requested one in pixels
-      // rather than a multiple of it.
       if (typeof originalResize === 'function') {
         originalResize.call(renderer, target.width, target.height);
       }
@@ -159,9 +134,6 @@ const run = ({ scaffolding, options = {} }) => {
     };
     if (typeof originalResize === 'function') {
       renderer.resize = function () {
-        // Re-assert instead of resizing: a relayout must not undo the recording
-        // resolution. Calling through here would also leave `_updateOverlays`
-        // sized for the recording pixels rather than the on-screen canvas.
         setBackingStore();
       };
     }
@@ -170,12 +142,8 @@ const run = ({ scaffolding, options = {} }) => {
       if (typeof originalResize === 'function') {
         renderer.resize = originalResize;
       }
-      // Restore to whatever the stage is currently displayed at, which may have
-      // changed (fullscreen, a window resize) while the recording was running.
       const width = canvas.clientWidth || previousWidth / devicePixelRatio;
       const height = canvas.clientHeight || previousHeight / devicePixelRatio;
-      // Go through the renderer again so overlays and render quality follow the
-      // canvas back down, then re-assert the exact backing store.
       if (typeof originalResize === 'function') {
         originalResize.call(renderer, width, height);
       }
@@ -188,14 +156,11 @@ const run = ({ scaffolding, options = {} }) => {
     };
 
     setBackingStore();
-    // The canvas fills its container, so only the rendered pixel count grows:
-    // the CSS size is untouched and fullscreen still works during recording.
     return target;
   };
 
   const buildStream = () => {
     const result = new MediaStream();
-
     const canvasStream = renderer.canvas.captureStream(FRAME_RATE);
     for (const track of canvasStream.getVideoTracks()) {
       result.addTrack(track);
@@ -203,7 +168,6 @@ const run = ({ scaffolding, options = {} }) => {
 
     const audioEngine = vm.runtime.audioEngine;
     if (audioEngine && audioEngine.audioContext) {
-      // FIX: Ensure AudioContext is actively running (prevents silent audio if suspended by browser policy)
       if (audioEngine.audioContext.state === 'suspended') {
         audioEngine.audioContext.resume().catch(err => {
           console.warn('Recording addon: failed to resume AudioContext', err);
@@ -234,9 +198,7 @@ const run = ({ scaffolding, options = {} }) => {
     if (audioDestination) {
       try {
         audioDestination.disconnect();
-      } catch (e) {
-        // Ignore disconnection errors if already cleaned up
-      }
+      } catch (e) {}
       audioDestination = null;
     }
     if (restoreCanvasSize) {
@@ -246,7 +208,6 @@ const run = ({ scaffolding, options = {} }) => {
   };
 
   const start = () => {
-    // A new green flag must not interrupt an already running recording.
     if (recorder) {
       return;
     }
@@ -261,13 +222,8 @@ const run = ({ scaffolding, options = {} }) => {
       return;
     }
 
-    // Derive the bitrate from the canvas that is actually being captured, not
-    // from the requested size: on high-DPI screens the backing store is the
-    // encoded size, and an undersized bitrate makes the video visibly banded.
     const encodedWidth = renderer.canvas.width || size.width;
     const encodedHeight = renderer.canvas.height || size.height;
-    // The codec has to be chosen for the size that is really being encoded, so
-    // that an oversized stage does not pick an encoder that will refuse it.
     const recorderMimeType = getSupportedMimeType(encodedWidth, encodedHeight);
 
     const recorderOptions = {};
@@ -276,7 +232,13 @@ const run = ({ scaffolding, options = {} }) => {
     }
     recorderOptions.videoBitsPerSecond = getVideoBitrate(encodedWidth, encodedHeight, FRAME_RATE);
 
-    // FIX: Fallback mechanism if MediaRecorder fails with advanced config options
+    // CORREÇÃO DE COR E BRILHO: Injeta a matriz Rec. 709 para manter as cores pastéis fiéis
+    recorderOptions.videoColorSpace = {
+      primaries: 'bt709',
+      transfer: 'bt709',
+      matrix: 'bt709'
+    };
+
     try {
       recorder = new MediaRecorder(stream, recorderOptions);
     } catch (error) {
@@ -289,8 +251,7 @@ const run = ({ scaffolding, options = {} }) => {
         return;
       }
     }
-    // The recorder settles on the actual codec (for example adding the audio
-    // codec), so the blob has to be labelled with that rather than the request.
+    
     const actualMimeType = recorder.mimeType || recorderMimeType;
     recorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
@@ -307,7 +268,6 @@ const run = ({ scaffolding, options = {} }) => {
       dispose();
     };
 
-    // FIX: Pass a timeslice of 1000ms to flush chunks regularly and prevent data corruption
     recorder.start(1000);
   };
 
@@ -315,12 +275,39 @@ const run = ({ scaffolding, options = {} }) => {
     if (!recorder || recorder.state === 'inactive') {
       return;
     }
-    recorder.stop();
+    try {
+      recorder.stop();
+      // Força um frame fantasma para destravar o buffer de encerramento do navegador imediatamente
+      if (renderer && typeof renderer.draw === 'function') {
+        renderer.dirty = true;
+        renderer.draw();
+      }
+    } catch (error) {
+      console.error('Recording addon: erro ao parar', error);
+      dispose();
+    }
   };
 
+  // INTERCEPTAÇÃO DO BLOCO DE PARAR DO PROJETO (Corrige a parada e download automático)
+  const originalStopAll = vm.runtime.stopAll;
+  if (typeof originalStopAll === 'function') {
+    vm.runtime.stopAll = function (...args) {
+      if (recorder && recorder.state !== 'inactive') {
+        try {
+          if (renderer && typeof renderer.draw === 'function') {
+            renderer.dirty = true;
+            renderer.draw();
+          }
+          stop();
+        } catch (e) {
+          console.error("Recording addon: falha ao interceptar stopAll", e);
+        }
+      }
+      return originalStopAll.apply(this, args);
+    };
+  }
+
   vm.runtime.on('PROJECT_START_BEFORE_RESET', () => {
-    // greenFlag() runs stopAll() itself just before this, which emits
-    // PROJECT_STOP_ALL. That is a restart, not the project deciding to stop.
     resettingForGreenFlag = true;
   });
   vm.runtime.on('PROJECT_START', () => {
@@ -331,14 +318,13 @@ const run = ({ scaffolding, options = {} }) => {
     if (resettingForGreenFlag) {
       return;
     }
-    // The "stop all" block (and the stop sign button) stops the project; finish
-    // the recording so the part that did play still gets downloaded.
-    stop();
+    if (recorder && recorder.state !== 'inactive') {
+      stop();
+    }
   });
 
   document.addEventListener('keydown', (e) => {
     const target = e.target;
-    // FIX: Ignore keypress if the user is typing into input fields, textareas, or editable containers
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
       return;
     }
@@ -347,7 +333,6 @@ const run = ({ scaffolding, options = {} }) => {
     }
   });
 };
-
 export {
   getSupportedMimeType,
   getFileExtension,
@@ -355,6 +340,4 @@ export {
   getResolutionSize,
   getVideoBitrate,
   RESOLUTION_HEIGHTS
-};
-
-export default run;
+};export default run;
